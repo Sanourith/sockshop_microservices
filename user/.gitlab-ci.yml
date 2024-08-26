@@ -1,0 +1,150 @@
+variables:
+  KUBE_NAMESPACE_dev: dev
+  KUBE_NAMESPACE_prod: prod
+  IP_DEV: 3.253.155.214 #Remplacer par votre IP de la VM
+  IP_PROD: 3.253.155.214 #Remplacer par votre IP de la VM
+  NODEPORT_DEV: 30001
+  NODEPORT_PROD: 30002
+
+
+image:
+  name: "ubuntu:20.04"
+  entrypoint:
+    - ["/bin/bash", "-c"]
+
+stages:
+  - test
+  - build
+  - run 
+  - push 
+  - deploy_dev 
+  - deploy_prod 
+  # - rollback
+
+## SCRIPTS
+
+# #Create a anchor for the deploy job 
+# .default_script_deploy: &default_script_deploy
+#   - rm -Rf ~/.kube | mkdir ~/.kube/
+#   - ls
+#   - cat $KUBE_CONFIG > ~/.kube/config
+#   # - kubectl config view --raw >~/.kube/config
+#   - sudo chmod 600 ~/.kube/config
+#   - cd ./helm-charts-app
+
+# #Create a anchor for the deploy job
+# .default_deploy_config_dev: &default_deploy_config_dev
+#   # Use the official docker image.
+#   image: docker:latest
+#   stage: deploy_dev
+#   variables:
+#     NAMESPACE: dev
+#   services:
+#     - docker:dind
+
+# #Create a anchor for the deploy job
+# .default_deploy_config_prod: &default_deploy_config_prod
+#   # Use the official docker image.
+#   image: docker:latest
+#   when: manual
+#   stage: deploy_prod
+#   variables:
+#     NAMESPACE: prod
+#   services:
+#     - docker:dind
+
+test_user:
+  stage: test
+  script:
+    # - cd ./helm-chart
+    - helm lint helm_chart #cart
+    - helm template helm_chart | sudo kubectl apply --dry-run=client -f -
+
+build-user:
+  stage: build
+  image: docker:19.03.12
+  script:
+    - docker build -t shopshosty/user:latest .
+    - docker tag "shopshosty/user:latest" "shopshosty/user:$CI_COMMIT_SHORT_SHA"
+  only:
+    - main
+
+run_user:
+  stage: run 
+  needs: ["build-user"]
+  script:
+    - set -e && docker rm run_user || true
+    - docker run -d -p 80:8000 --name run_user "shopshosty/user:$CI_COMMIT_SHORT_SHA"
+    - sleep 10
+    - curl localhost:80 
+    - docker stop run_user
+    - docker rm run_user
+
+push_user:
+  stage: push 
+  needs: ["run_user"]
+  before_script:
+    - docker --version
+    - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+  script:
+    - docker push "shopshosty/user:$CI_COMMIT_SHORT_SHA"
+    - PREV=$(docker images -q "shopshosty/user:latest" | head -n 1)
+    - CURR=$(docker images -q "shopshosty/user:$CI_COMMIT_SHORT_SHA" | head -n 1)
+    - if [ "$PREV" != "$CURR"]; then docker push "shopshosty/user:$CI_COMMIT_SHORT_SHA"; fi
+
+stop_dev: 
+  stage: deploy_dev 
+  variables:
+    NAMESPACE: dev
+  when: manual
+  environment:
+    name: dev-user-$CI_BUILD_REF_NAME
+    action: stop
+  script:
+    - sudo helm uninstall user_deploy -n $NAMESPACE
+
+stop_prod: 
+  stage: deploy_prod 
+  variables:
+    NAMESPACE: prod
+  when: manual
+  environment:
+    name: prod-user-$CI_BUILD_REF_NAME
+    action: stop
+  script:
+    - sudo helm uninstall user_deploy -n $NAMESPACE
+
+deploy_dev: 
+  image: docker:latest 
+  environment:
+    name: dev-user-$CI_BUILD_REF_NAME
+    url: "http://$IP_DEV:$NODEPORT_DEV"
+    on_stop: stop_dev
+  stage: deploy_dev 
+  variables:
+    NAMESPACE: dev 
+  services:
+    - docker:dind
+  script:
+    - rm -Rf ~/.kube | mkdir ~/.kube/
+    - ls
+    - cat $KUBE_CONFIG > ~/.kube/config
+    - sudo helm upgrade --install user_deploy "./helm_chart" --values "./helm_chart/values.yaml" --namespace "$KUBE_NAMESPACE_dev" --set namespace="$NAMESPACE" --set user.nodePort="$NODEPORT_DEV"
+
+deploy_prod: 
+  image: docker:latest 
+  environment:
+    name: prod-user-$CI_BUILD_REF_NAME
+    url: "http://$IP_PROD:$NODEPORT_PROD"
+    on_stop: stop_prod
+  stage: deploy_prod 
+  when: manual
+  variables:
+    NAMESPACE: prod 
+  services:
+    - docker:dind
+  script:
+    - rm -Rf ~/.kube | mkdir ~/.kube/
+    - ls
+    - cat $KUBE_CONFIG > ~/.kube/config
+    - sudo helm upgrade --install user_deploy "./helm_chart" --values "./helm_chart/values.yaml" --namespace "$KUBE_NAMESPACE_prod" --set namespace="$NAMESPACE" --set user.nodePort="$NODEPORT_PROD"

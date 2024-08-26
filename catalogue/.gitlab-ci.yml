@@ -1,0 +1,137 @@
+variables:
+  APP_PORT: 8080
+  KUBE_NAMESPACE_prod: prod
+  KUBE_NAMESPACE_dev: dev
+  KUBE_NAMESPACE_staging: staging
+  KUBE_NAMESPACE_qa: qa
+  IP_PROD: 3.252.223.158
+  IP_DEV: 3.252.223.158
+  IP_STAGING: 3.252.223.158
+  IP_QA: 3.252.223.158
+  NODEPORT_PROD: 30010
+  NODEPORT_DEV: 30011
+  NODEPORT_STAGING: 30012
+  NODEPORT_QA: 30013
+  IMAGE: "shopshosty/catalogue"
+  REGISTRY_URL: "https://index.docker.io/v1/"
+
+image:
+  name: "ubuntu:20.04"
+  entrypoint: ["/bin/bash", "-c"]
+
+stages:
+  - test_app
+  - build
+  - run
+  - test_container
+  - push
+  - test_helm
+  - deploy_dev
+  - test_dev
+  - rollback_dev
+  - deploy_prod
+  - test_prod
+  - rollback_prod
+
+build-catalogue:
+  stage: build
+  image:
+    name: docker:latest
+  script:
+    - unset DOCKER_HOST
+    - echo "$DOCKER_TOKEN" | docker login "$REGISTRY_URL" -u "$DOCKER_USERNAME" --password-stdin
+    - docker build -t "$IMAGE:latest" -f "./docker/catalogue/Dockerfile" .
+    - docker tag "$IMAGE:latest" "$IMAGE:$CI_COMMIT_SHORT_SHA"
+  only:
+    - main
+
+run_catalogue:
+  stage: run
+  needs: ["build-catalogue"]
+  script:
+    - set -e && docker rm run_catalogue || true
+    - docker run -d -p "80:$APP_PORT" --name run_catalogue "$IMAGE:$CI_COMMIT_SHORT_SHA"
+    - sleep 10
+    - curl localhost:80
+    - docker stop run_catalogue
+    - docker rm run_catalogue
+  only:
+    - main
+
+push_catalogue:
+  stage: push
+  needs: ["run_catalogue"]
+  before_script:
+    - docker --version
+    - docker info
+    - echo "$DOCKER_TOKEN" | docker login "$REGISTRY_URL" -u "$DOCKER_USERNAME" --password-stdin
+  script:
+    - docker push "$IMAGE:$CI_COMMIT_SHORT_SHA"
+    # - PREV=$(docker images -q "$IMAGE:latest" | head -n 1)
+    # - CURR=$(docker images -q "$IMAGE:$CI_COMMIT_SHORT_SHA" | head -n 1)
+    # - if [ "$PREV" != "$CURR"]; then docker push "$IMAGE:$CI_COMMIT_SHORT_SHA"; fi
+
+# test_helm:
+#   stage: test_helm
+#   script:
+#     - helm lint helm_chart
+#     - helm template helm_chart | sudo kubectl apply --dry-run=client -f -
+#   only:
+#     - main
+
+stop_dev:
+  stage: deploy_dev
+  variables:
+    NAMESPACE: dev
+  when: manual
+  environment:
+    name: dev-catalogue-$CI_BUILD_REF_NAME
+    action: stop
+  script:
+    - sudo helm uninstall catalogue -n $NAMESPACE
+
+stop_prod:
+  stage: deploy_prod
+  variables:
+    NAMESPACE: prod
+  when: manual
+  environment:
+    name: prod-catalogue-$CI_BUILD_REF_NAME
+    action: stop
+  script:
+    - sudo helm uninstall catalogue -n $NAMESPACE
+
+deploy_dev:
+  image:
+    name: docker:latest
+  environment:
+    name: dev-catalogue-$CI_BUILD_REF_NAME
+    url: "http://$IP_DEV:$NODEPORT_DEV"
+    on_stop: stop_dev
+  stage: deploy_dev
+  variables:
+    NAMESPACE: dev
+  services:
+    - docker:dind
+  script:
+    - rm -Rf ~/.kube | mkdir ~/.kube/
+    - ls
+    - cat $KUBE_CONFIG > ~/.kube/config
+    - sudo helm upgrade --install catalogue "./helm_chart" --values "./helm_chart/values.yaml" --namespace "$KUBE_NAMESPACE_dev" --set namespace="$KUBE_NAMESPACE_dev" --set catalogue.image.repo="$IMAGE" --set catalogue.image.tag="$CI_COMMIT_SHORT_SHA" --set catalogue.service.type="NodePort" --set catalogue.service.nodePort="$NODEPORT_DEV"
+
+deploy_prod:
+  image:
+    name: docker:latest
+  environment:
+    name: prod-catalogue-$CI_BUILD_REF_NAME
+    on_stop: stop_prod
+  stage: deploy_prod
+  variables:
+    NAMESPACE: prod
+  services:
+    - docker:dind
+  script:
+    - rm -Rf ~/.kube | mkdir ~/.kube/
+    - ls
+    - cat $KUBE_CONFIG > ~/.kube/config
+    - sudo helm upgrade --install catalogue "./helm_chart" --values "./helm_chart/values.yaml" --namespace "$KUBE_NAMESPACE_prod" --set namespace="$KUBE_NAMESPACE_prod" --set catalogue.image.repo="$IMAGE" --set catalogue.image.tag="$CI_COMMIT_SHORT_SHA"

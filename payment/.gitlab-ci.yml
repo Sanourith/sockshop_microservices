@@ -1,0 +1,150 @@
+variables:
+  KUBE_NAMESPACE_dev: dev
+  KUBE_NAMESPACE_prod: prod
+  IP_DEV: 3.253.155.214 #Remplacer par votre IP de la VM
+  IP_PROD: 3.253.155.214 #Remplacer par votre IP de la VM
+  NODEPORT_DEV: 30001
+  NODEPORT_PROD: 30002
+
+
+image:
+  name: "ubuntu:20.04"
+  entrypoint:
+    - ["/bin/bash", "-c"]
+
+stages:
+  - test
+  - build
+  - run 
+  - push 
+  - deploy_dev 
+  - deploy_prod 
+  # - rollback
+
+## SCRIPTS
+
+# #Create a anchor for the deploy job 
+# .default_script_deploy: &default_script_deploy
+#   - rm -Rf ~/.kube | mkdir ~/.kube/
+#   - ls
+#   - cat $KUBE_CONFIG > ~/.kube/config
+#   # - kubectl config view --raw >~/.kube/config
+#   - sudo chmod 600 ~/.kube/config
+#   - cd ./helm-charts-app
+
+# #Create a anchor for the deploy job
+# .default_deploy_config_dev: &default_deploy_config_dev
+#   # Use the official docker image.
+#   image: docker:latest
+#   stage: deploy_dev
+#   variables:
+#     NAMESPACE: dev
+#   services:
+#     - docker:dind
+
+# #Create a anchor for the deploy job
+# .default_deploy_config_prod: &default_deploy_config_prod
+#   # Use the official docker image.
+#   image: docker:latest
+#   when: manual
+#   stage: deploy_prod
+#   variables:
+#     NAMESPACE: prod
+#   services:
+#     - docker:dind
+
+test_payment:
+  stage: test
+  script:
+    # - cd ./helm-chart
+    - helm lint helm_chart #cart
+    - helm template helm_chart | sudo kubectl apply --dry-run=client -f -
+
+build-payment:
+  stage: build
+  image: docker:19.03.12
+  script:
+    - docker build -t shopshosty/payment:latest .
+    - docker tag "shopshosty/payment:latest" "shopshosty/payment:$CI_COMMIT_SHORT_SHA"
+  only:
+    - main
+
+run_payment:
+  stage: run 
+  needs: ["build-payment"]
+  script:
+    - set -e && docker rm run_payment || true
+    - docker run -d -p 80:8000 --name run_payment "shopshosty/payment:$CI_COMMIT_SHORT_SHA"
+    - sleep 10
+    - curl localhost:80 
+    - docker stop run_payment
+    - docker rm run_payment
+
+push_payment:
+  stage: push 
+  needs: ["run_payment"]
+  before_script:
+    - docker --version
+    - echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+  script:
+    - docker push "shopshosty/payment:$CI_COMMIT_SHORT_SHA"
+    - PREV=$(docker images -q "shopshosty/payment:latest" | head -n 1)
+    - CURR=$(docker images -q "shopshosty/payment:$CI_COMMIT_SHORT_SHA" | head -n 1)
+    - if [ "$PREV" != "$CURR"]; then docker push "shopshosty/payment:$CI_COMMIT_SHORT_SHA"; fi
+
+stop_dev: 
+  stage: deploy_dev 
+  variables:
+    NAMESPACE: dev
+  when: manual
+  environment:
+    name: dev-payment-$CI_BUILD_REF_NAME
+    action: stop
+  script:
+    - sudo helm uninstall payment_deploy -n $NAMESPACE
+
+stop_prod: 
+  stage: deploy_prod 
+  variables:
+    NAMESPACE: prod
+  when: manual
+  environment:
+    name: prod-payment-$CI_BUILD_REF_NAME
+    action: stop
+  script:
+    - sudo helm uninstall payment_deploy -n $NAMESPACE
+
+deploy_dev: 
+  image: docker:latest 
+  environment:
+    name: dev-payment-$CI_BUILD_REF_NAME
+    url: "http://$IP_DEV:$NODEPORT_DEV"
+    on_stop: stop_dev
+  stage: deploy_dev 
+  variables:
+    NAMESPACE: dev 
+  services:
+    - docker:dind
+  script:
+    - rm -Rf ~/.kube | mkdir ~/.kube/
+    - ls
+    - cat $KUBE_CONFIG > ~/.kube/config
+    - sudo helm upgrade --install payment_deploy "./helm_chart" --values "./helm_chart/values.yaml" --namespace "$KUBE_NAMESPACE_dev" --set namespace="$NAMESPACE" --set payment.nodePort="$NODEPORT_DEV"
+
+deploy_prod: 
+  image: docker:latest 
+  environment:
+    name: prod-payment-$CI_BUILD_REF_NAME
+    url: "http://$IP_PROD:$NODEPORT_PROD"
+    on_stop: stop_prod
+  stage: deploy_prod 
+  when: manual
+  variables:
+    NAMESPACE: prod 
+  services:
+    - docker:dind
+  script:
+    - rm -Rf ~/.kube | mkdir ~/.kube/
+    - ls
+    - cat $KUBE_CONFIG > ~/.kube/config
+    - sudo helm upgrade --install payment_deploy "./helm_chart" --values "./helm_chart/values.yaml" --namespace "$KUBE_NAMESPACE_prod" --set namespace="$NAMESPACE" --set payment.nodePort="$NODEPORT_PROD"
