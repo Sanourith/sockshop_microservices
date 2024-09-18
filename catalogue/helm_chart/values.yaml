@@ -12,6 +12,12 @@ java:
 istio:
   enabled: false
 
+hpa:
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 70
+  
 carts:
   containerPort: 80
 

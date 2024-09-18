@@ -17,6 +17,12 @@ ingress:
   host: ''
   tlsSecretName: ''
 
+hpa:
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 70
+
 cartsdb:
   image:
     repo: mongo
